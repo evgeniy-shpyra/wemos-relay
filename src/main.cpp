@@ -1,30 +1,45 @@
 #include <Arduino.h>
-
-#define SETTINGS_LED_PIN 4
-#define WORK_LED_PIN 0
-#define RESET_BTN_PIN 2
-#define RELAY_PIN 16
-
 #include "storage.h"
 #include "server.h"
 #include <WebSocketsClient.h>
 #include <Hash.h>
 #include <ArduinoJson.h>
 
-const char *AP_SSID = "Wemos-led";
+#define SETTINGS_LED_PIN 14
+#define WORK_LED_PIN 5
+
+#define ON_LED 0
+#define OFF_LED 4
+
+#define RESET_BTN 2
+#define RELAY 16
+
+#define ON_BTN 12
+#define OFF_BTN 13
+
+const char *AP_SSID = "WemosRelay";
 const char *AP_PASS = "12345678";
 
 WebSocketsClient webSocket;
 
-void prepareJson(String &str)
+bool currStatus = false;
+bool isAutoToggled = false;
+bool statusBeforeAction = false;
+void turnOnRelay()
 {
-  char c = '\\';
-  str.remove(0, 1);
-  str.remove(str.length() - 1);
-  while (str.indexOf(c) != -1)
-  {
-    str.replace(String(c), "");
-  }
+  digitalWrite(RELAY, HIGH);
+  digitalWrite(ON_LED, HIGH);
+  digitalWrite(OFF_LED, LOW);
+  currStatus = true;
+  webSocket.sendTXT("{\"action\": \"changeStatus\", \"status\": true}");
+}
+void turnOffRelay()
+{
+  digitalWrite(RELAY, LOW);
+  digitalWrite(OFF_LED, HIGH);
+  digitalWrite(ON_LED, LOW);
+  currStatus = false;
+  webSocket.sendTXT("{\"action\": \"changeStatus\", \"status\": false}");
 }
 
 void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
@@ -33,17 +48,18 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
   {
   case WStype_DISCONNECTED:
     Serial.println("[WSc] Disconnected!\n");
+    digitalWrite(WORK_LED_PIN, LOW);
     break;
   case WStype_CONNECTED:
   {
     Serial.println("[WSc] Connected to url:");
     Serial.println(String((char *)payload));
-    webSocket.sendTXT("Connected");
+    digitalWrite(WORK_LED_PIN, HIGH);
   }
   break;
   case WStype_TEXT:
     String dataJson = String((char *)payload);
-    prepareJson(dataJson);
+    Serial.println(dataJson);
     DynamicJsonDocument doc(200);
     DeserializationError error = deserializeJson(doc, dataJson);
     if (error)
@@ -53,21 +69,38 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
       return;
     }
 
-    bool status = doc["status"];
     String action = doc["action"];
 
-    if (action == "toggleStatus")
+    if (action == "autoToggleStatus")
     {
-      if (status)
+      bool status = doc["status"];
+      bool actionStatus = doc["actionStatus"];
+      if (actionStatus)
       {
-        Serial.println("on");
-         digitalWrite(RELAY_PIN, HIGH);
+        isAutoToggled = true;
+        statusBeforeAction = currStatus;
+        status ? turnOnRelay() : turnOffRelay();
       }
       else
       {
-        Serial.println("off");
-         digitalWrite(RELAY_PIN, LOW);
+        if (isAutoToggled)
+        {
+          statusBeforeAction ? turnOnRelay() : turnOffRelay();
+          isAutoToggled = false;
+        }
       }
+    }
+    else if(action == "getStatus"){
+      StaticJsonDocument<50> jsonDocument;
+
+      jsonDocument["action"] = "status";
+      jsonDocument["status"] = currStatus;
+
+      String jsonString;
+      serializeJson(jsonDocument, jsonString);
+
+      // Выводим JSON на Serial Monitor
+      webSocket.sendTXT(jsonString);
     }
     break;
   }
@@ -76,32 +109,57 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
 Storage storage;
 SettingsServer settingsServer(storage, SETTINGS_LED_PIN);
 
-void readResetBtn()
+void readButtons()
 {
-  int resetBtn = digitalRead(RESET_BTN_PIN);
+  int resetBtn = digitalRead(RESET_BTN);
   if (resetBtn == LOW)
   {
-    Serial.println("Button is pressed");
     storage.deleteSettings();
     ESP.restart();
+  }
+
+  int onBtn = digitalRead(ON_BTN);
+  int offBtn = digitalRead(OFF_BTN);
+  
+  if (onBtn == LOW && offBtn == LOW)
+  {
+    return;
+  }
+  if (onBtn == LOW && !currStatus)
+  {
+    turnOnRelay();
+  }
+
+  if (offBtn == LOW && currStatus)
+  {
+    turnOffRelay();
   }
 }
 
 void setup()
 {
   Serial.begin(115200);
-  pinMode(RESET_BTN_PIN, INPUT);
+  pinMode(RESET_BTN, INPUT_PULLUP);
+  pinMode(ON_BTN, INPUT_PULLUP); 
+  pinMode(OFF_BTN, INPUT_PULLUP); 
   pinMode(WORK_LED_PIN, OUTPUT);
-  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(SETTINGS_LED_PIN, OUTPUT);
+  pinMode(RELAY, OUTPUT);
+  pinMode(OFF_LED, OUTPUT);
+  pinMode(ON_LED, OUTPUT);
 
   settingsServer.setup();
   bool isSettings = storage.settingsExist();
+
+  turnOffRelay();
 
   if (isSettings == true)
   {
     SettingsStructure settings = storage.getSettings();
     Serial.println(settings.wifiSsid);
     Serial.println(settings.wifiPassword);
+    Serial.println(settings.name);
+    Serial.println(settings.key);
 
     WiFi.begin(settings.wifiSsid, settings.wifiPassword);
     while (WiFi.status() != WL_CONNECTED)
@@ -110,15 +168,15 @@ void setup()
       delay(250);
       digitalWrite(WORK_LED_PIN, LOW);
       delay(250);
-      readResetBtn();
+      readButtons();
       Serial.print(".");
     }
-    digitalWrite(WORK_LED_PIN, HIGH);
+    digitalWrite(WORK_LED_PIN, LOW);
     Serial.println("Connected");
     Serial.println(WiFi.localIP());
 
     webSocket.begin(settings.hubIp, 9000, "/ws/device");
-    webSocket.setAuthorization("1", "111");
+    webSocket.setAuthorization(settings.name, settings.key);
     webSocket.onEvent(webSocketEvent);
     webSocket.setReconnectInterval(5000);
     webSocket.enableHeartbeat(15000, 3000, 2);
@@ -139,7 +197,7 @@ void setup()
 
 void loop()
 {
-  readResetBtn();
+  readButtons();
   settingsServer.loop();
   webSocket.loop();
 }

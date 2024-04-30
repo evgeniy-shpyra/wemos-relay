@@ -19,6 +19,7 @@ public:
 
   void startServer()
   {
+    digitalWrite(ledPin, HIGH);
     isRunning = true;
     server.on("/", HTTP_GET, [this]()
               { this->rootRoute(); });
@@ -32,19 +33,19 @@ public:
   void stopServer()
   {
     isRunning = false;
+    digitalWrite(ledPin, LOW);
     server.stop();
   }
 
   void loop()
   {
     if (!isRunning)
-      return;
-    digitalWrite(ledPin, HIGH);
+      return; 
     server.handleClient();
   }
   void setup()
   {
-   
+    
   }
 
 private:
