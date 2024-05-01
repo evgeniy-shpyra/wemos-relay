@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "storage.h"
 #include "server.h"
+#include "button.h"
 #include <WebSocketsClient.h>
 #include <Hash.h>
 #include <ArduinoJson.h>
@@ -10,36 +11,52 @@
 
 #define ON_LED 0
 #define OFF_LED 4
+#define AUTO_CHANGING_LED 15
 
 #define RESET_BTN 2
 #define RELAY 16
 
-#define ON_BTN 12
-#define OFF_BTN 13
+#define TOGGLE_STATUS_BTN 12
+#define TOGGLE_AUTO_CHANGING_BTN 13
 
 const char *AP_SSID = "WemosRelay";
 const char *AP_PASS = "12345678";
 
 WebSocketsClient webSocket;
 
+Button toggleStatusBtn(TOGGLE_STATUS_BTN);
+Button toggleAutoChangingBtn(TOGGLE_AUTO_CHANGING_BTN);
+Button resetBtn(RESET_BTN);
+
 bool currStatus = false;
 bool isAutoToggled = false;
+bool isAutoChanging = true;
 bool statusBeforeAction = false;
-void turnOnRelay()
+
+void toggleStatus(bool isOn)
 {
-  digitalWrite(RELAY, HIGH);
-  digitalWrite(ON_LED, HIGH);
-  digitalWrite(OFF_LED, LOW);
-  currStatus = true;
-  webSocket.sendTXT("{\"action\": \"changeStatus\", \"status\": true}");
+  if (isOn)
+  {
+    digitalWrite(RELAY, HIGH);
+    digitalWrite(ON_LED, HIGH);
+    digitalWrite(OFF_LED, LOW);
+    currStatus = true;
+    webSocket.sendTXT("{\"action\": \"changeStatus\", \"status\": true}");
+  }
+  else
+  {
+    digitalWrite(RELAY, LOW);
+    digitalWrite(OFF_LED, HIGH);
+    digitalWrite(ON_LED, LOW);
+    currStatus = false;
+    webSocket.sendTXT("{\"action\": \"changeStatus\", \"status\": false}");
+  }
 }
-void turnOffRelay()
+
+void toggleAutoChanging(bool isOn)
 {
-  digitalWrite(RELAY, LOW);
-  digitalWrite(OFF_LED, HIGH);
-  digitalWrite(ON_LED, LOW);
-  currStatus = false;
-  webSocket.sendTXT("{\"action\": \"changeStatus\", \"status\": false}");
+  isAutoChanging = isOn;
+  digitalWrite(AUTO_CHANGING_LED, isOn ? HIGH : LOW);
 }
 
 void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
@@ -73,24 +90,26 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
 
     if (action == "autoToggleStatus")
     {
+      if(!isAutoChanging) return;
       bool status = doc["status"];
       bool actionStatus = doc["actionStatus"];
       if (actionStatus)
       {
         isAutoToggled = true;
         statusBeforeAction = currStatus;
-        status ? turnOnRelay() : turnOffRelay();
+        toggleStatus(status);
       }
       else
       {
         if (isAutoToggled)
         {
-          statusBeforeAction ? turnOnRelay() : turnOffRelay();
+          toggleStatus(statusBeforeAction);
           isAutoToggled = false;
         }
       }
     }
-    else if(action == "getStatus"){
+    else if (action == "getStatus")
+    {
       StaticJsonDocument<50> jsonDocument;
 
       jsonDocument["action"] = "status";
@@ -99,8 +118,11 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
       String jsonString;
       serializeJson(jsonDocument, jsonString);
 
-      // Выводим JSON на Serial Monitor
       webSocket.sendTXT(jsonString);
+    }
+    else if(action == "changeStatus"){
+      bool status = doc["status"];
+      toggleStatus(status);
     }
     break;
   }
@@ -111,62 +133,64 @@ SettingsServer settingsServer(storage, SETTINGS_LED_PIN);
 
 void readButtons()
 {
-  int resetBtn = digitalRead(RESET_BTN);
-  if (resetBtn == LOW)
+  toggleStatusBtn.loop();
+  toggleAutoChangingBtn.loop();
+  resetBtn.loop();
+
+  if (toggleStatusBtn.isClick())
   {
+    Serial.println("toggleStatusBtn");
+    toggleStatus(!currStatus);
+  }
+
+  if (toggleAutoChangingBtn.isClick())
+  {
+    Serial.println("toggleAutoChangingBtn");
+    toggleAutoChanging(!isAutoChanging);
+  }
+
+  if (resetBtn.isClick())
+  {
+    Serial.println("resetBtn");
     storage.deleteSettings();
     ESP.restart();
-  }
-
-  int onBtn = digitalRead(ON_BTN);
-  int offBtn = digitalRead(OFF_BTN);
-  
-  if (onBtn == LOW && offBtn == LOW)
-  {
-    return;
-  }
-  if (onBtn == LOW && !currStatus)
-  {
-    turnOnRelay();
-  }
-
-  if (offBtn == LOW && currStatus)
-  {
-    turnOffRelay();
   }
 }
 
 void setup()
 {
   Serial.begin(115200);
-  pinMode(RESET_BTN, INPUT_PULLUP);
-  pinMode(ON_BTN, INPUT_PULLUP); 
-  pinMode(OFF_BTN, INPUT_PULLUP); 
+
   pinMode(WORK_LED_PIN, OUTPUT);
   pinMode(SETTINGS_LED_PIN, OUTPUT);
+  pinMode(AUTO_CHANGING_LED, OUTPUT);
   pinMode(RELAY, OUTPUT);
   pinMode(OFF_LED, OUTPUT);
   pinMode(ON_LED, OUTPUT);
 
+  toggleStatusBtn.setup();
+  toggleAutoChangingBtn.setup();
+  resetBtn.setup();
+
   settingsServer.setup();
   bool isSettings = storage.settingsExist();
 
-  turnOffRelay();
+  toggleStatus(false);
+  
 
   if (isSettings == true)
   {
+    toggleAutoChanging(true);
     SettingsStructure settings = storage.getSettings();
-    Serial.println(settings.wifiSsid);
-    Serial.println(settings.wifiPassword);
-    Serial.println(settings.name);
-    Serial.println(settings.key);
 
     WiFi.begin(settings.wifiSsid, settings.wifiPassword);
     while (WiFi.status() != WL_CONNECTED)
     {
       digitalWrite(WORK_LED_PIN, HIGH);
+      readButtons();
       delay(250);
       digitalWrite(WORK_LED_PIN, LOW);
+      readButtons();
       delay(250);
       readButtons();
       Serial.print(".");
@@ -183,6 +207,7 @@ void setup()
   }
   else
   {
+    toggleAutoChanging(false);
     Serial.print("data isn't exist");
     WiFi.mode(WIFI_AP);
     WiFi.softAP(AP_SSID, AP_PASS);
