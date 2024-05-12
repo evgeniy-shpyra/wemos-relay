@@ -1,9 +1,12 @@
 #include <Arduino.h>
+
+#include "button.h"
+#include "led.h"
 #include "storage.h"
 #include "server.h"
-#include "button.h"
-#include <WebSocketsClient.h>
-#include <Hash.h>
+
+// #include <ESP8266WiFi.h>
+#include <PubSubClient.h>
 #include <ArduinoJson.h>
 
 #define SETTINGS_LED_PIN 14
@@ -22,16 +25,30 @@
 const char *AP_SSID = "WemosRelay";
 const char *AP_PASS = "12345678";
 
-WebSocketsClient webSocket;
+String name;
+
+WiFiClient espClient;
+PubSubClient mqttClient(espClient);
+
+Led settingsLed(SETTINGS_LED_PIN);
+Led workLed(WORK_LED_PIN);
+Led onLed(ON_LED);
+Led offLed(OFF_LED);
+Led autoChangingLed(AUTO_CHANGING_LED);
 
 Button toggleStatusBtn(TOGGLE_STATUS_BTN);
 Button toggleAutoChangingBtn(TOGGLE_AUTO_CHANGING_BTN);
 Button resetBtn(RESET_BTN);
 
+Storage storage;
+SettingsServer settingsServer(storage, settingsLed);
+
 bool currStatus = false;
 bool isAutoToggled = false;
 bool isAutoChanging = true;
 bool statusBeforeAction = false;
+
+bool isWorkMode = false;
 
 void toggleStatus(bool isOn)
 {
@@ -41,7 +58,7 @@ void toggleStatus(bool isOn)
     digitalWrite(ON_LED, HIGH);
     digitalWrite(OFF_LED, LOW);
     currStatus = true;
-    webSocket.sendTXT("{\"action\": \"changeStatus\", \"status\": true}");
+    // webSocket.sendTXT("{\"action\": \"changeStatus\", \"status\": true}");
   }
   else
   {
@@ -49,87 +66,15 @@ void toggleStatus(bool isOn)
     digitalWrite(OFF_LED, HIGH);
     digitalWrite(ON_LED, LOW);
     currStatus = false;
-    webSocket.sendTXT("{\"action\": \"changeStatus\", \"status\": false}");
+    // webSocket.sendTXT("{\"action\": \"changeStatus\", \"status\": false}");
   }
 }
 
 void toggleAutoChanging(bool isOn)
 {
   isAutoChanging = isOn;
-  digitalWrite(AUTO_CHANGING_LED, isOn ? HIGH : LOW);
+  isOn ? autoChangingLed.on() : autoChangingLed.off();
 }
-
-void webSocketEvent(WStype_t type, uint8_t *payload, size_t length)
-{
-  switch (type)
-  {
-  case WStype_DISCONNECTED:
-    Serial.println("[WSc] Disconnected!\n");
-    digitalWrite(WORK_LED_PIN, LOW);
-    break;
-  case WStype_CONNECTED:
-  {
-    Serial.println("[WSc] Connected to url:");
-    Serial.println(String((char *)payload));
-    digitalWrite(WORK_LED_PIN, HIGH);
-  }
-  break;
-  case WStype_TEXT:
-    String dataJson = String((char *)payload);
-    Serial.println(dataJson);
-    DynamicJsonDocument doc(200);
-    DeserializationError error = deserializeJson(doc, dataJson);
-    if (error)
-    {
-      Serial.print("deserializeJson() failed: ");
-      Serial.println(error.c_str());
-      return;
-    }
-
-    String action = doc["action"];
-
-    if (action == "autoToggleStatus")
-    {
-      if(!isAutoChanging) return;
-      bool status = doc["status"];
-      bool actionStatus = doc["actionStatus"];
-      if (actionStatus)
-      {
-        isAutoToggled = true;
-        statusBeforeAction = currStatus;
-        toggleStatus(status);
-      }
-      else
-      {
-        if (isAutoToggled)
-        {
-          toggleStatus(statusBeforeAction);
-          isAutoToggled = false;
-        }
-      }
-    }
-    else if (action == "getStatus")
-    {
-      StaticJsonDocument<50> jsonDocument;
-
-      jsonDocument["action"] = "status";
-      jsonDocument["status"] = currStatus;
-
-      String jsonString;
-      serializeJson(jsonDocument, jsonString);
-
-      webSocket.sendTXT(jsonString);
-    }
-    else if(action == "changeStatus"){
-      bool status = doc["status"];
-      toggleStatus(status);
-    }
-    break;
-  }
-}
-
-Storage storage;
-SettingsServer settingsServer(storage, SETTINGS_LED_PIN);
 
 void readButtons()
 {
@@ -157,17 +102,114 @@ void readButtons()
   }
 }
 
+void sendStatus()
+{
+  String topic = "device/" + name + "/status/set";
+  String jsonString = "{\"status\": " + String(currStatus ? "true" : "false") + "}";
+
+  mqttClient.publish(topic.c_str(), jsonString.c_str());
+}
+
+void handleAutoChangeStatus (bool deviceStatus, bool sensorStatus) {
+  if(!isAutoChanging) return;
+  if (sensorStatus)
+  {
+    isAutoToggled = true;
+    statusBeforeAction = currStatus;
+    toggleStatus(deviceStatus);
+  }
+  else
+  {
+    if (isAutoToggled)
+    {
+      toggleStatus(statusBeforeAction);
+      isAutoToggled = false;
+    }
+  }
+}
+
+void MQTTcallback(char *topic, byte *payload, unsigned int length)
+{
+  String changeStatusTopic = "device/" + name + "/status/change";
+ 
+
+  Serial.print("Message received in topic: ");
+  Serial.println(topic);
+  Serial.print("Message:");
+  String message;
+  for (int i = 0; i < length; i++)
+  {
+    message = message + (char)payload[i];
+  }
+
+  Serial.println(message);
+
+  DynamicJsonDocument doc(200);
+  DeserializationError error = deserializeJson(doc, message);
+  if (error)
+  {
+    Serial.print("deserializeJson() failed: ");
+    Serial.println(error.c_str());
+    return;
+  }
+
+  if (strcmp(topic, "ping") == 0)
+  {
+    sendStatus();
+  }
+  else if (strcmp(topic, changeStatusTopic.c_str()) == 0)
+  {
+    if(doc["isAction"]){
+      handleAutoChangeStatus(doc["deviceStatus"], doc["sensorStatus"]);
+    }
+    else{
+      toggleStatus(doc["deviceStatus"]);
+    }
+  }
+ 
+}
+
+void tryMQTTConnect()
+{
+  while (!mqttClient.connected())
+  {
+    Serial.println("Connecting to MQTT");
+    readButtons();
+    if (mqttClient.connect("ESP8266"))
+    {
+      Serial.println("connected");
+      workLed.on();
+    }
+    else
+    {
+      workLed.toggle();
+      Serial.print(".");
+      delay(250);
+    }
+  }
+  mqttClient.setCallback(MQTTcallback);
+  mqttClient.subscribe("ping");
+
+  String changeStatusTopic = "device/" + name + "/status/#";
+  mqttClient.subscribe(changeStatusTopic.c_str());
+
+  String getStatusTopic = "device/" + name + "/status/get";
+  mqttClient.publish(getStatusTopic.c_str(), "true");
+}
+
 void setup()
 {
   Serial.begin(115200);
 
-  pinMode(WORK_LED_PIN, OUTPUT);
-  pinMode(SETTINGS_LED_PIN, OUTPUT);
-  pinMode(AUTO_CHANGING_LED, OUTPUT);
-  pinMode(RELAY, OUTPUT);
-  pinMode(OFF_LED, OUTPUT);
-  pinMode(ON_LED, OUTPUT);
+  // leds
+  workLed.setup();
+  offLed.setup();
+  onLed.setup();
+  autoChangingLed.setup();
 
+  pinMode(RELAY, OUTPUT);
+
+  // buttons
   toggleStatusBtn.setup();
   toggleAutoChangingBtn.setup();
   resetBtn.setup();
@@ -176,34 +218,29 @@ void setup()
   bool isSettings = storage.settingsExist();
 
   toggleStatus(false);
-  
 
   if (isSettings == true)
   {
+    isWorkMode = true;
     toggleAutoChanging(true);
     SettingsStructure settings = storage.getSettings();
+
+    name = settings.name;
 
     WiFi.begin(settings.wifiSsid, settings.wifiPassword);
     while (WiFi.status() != WL_CONNECTED)
     {
-      digitalWrite(WORK_LED_PIN, HIGH);
-      readButtons();
-      delay(250);
-      digitalWrite(WORK_LED_PIN, LOW);
-      readButtons();
-      delay(250);
+      workLed.toggle();
       readButtons();
       Serial.print(".");
+      delay(500);
     }
-    digitalWrite(WORK_LED_PIN, LOW);
-    Serial.println("Connected");
-    Serial.println(WiFi.localIP());
+    workLed.off();
+    Serial.print("Connected to WiFi :");
+    Serial.println(WiFi.SSID());
 
-    webSocket.begin(settings.hubIp, 9000, "/ws/device");
-    webSocket.setAuthorization(settings.name, settings.key);
-    webSocket.onEvent(webSocketEvent);
-    webSocket.setReconnectInterval(5000);
-    webSocket.enableHeartbeat(15000, 3000, 2);
+    mqttClient.setServer(settings.hubIp, 1883);
+    tryMQTTConnect();
   }
   else
   {
@@ -223,6 +260,17 @@ void setup()
 void loop()
 {
   readButtons();
-  settingsServer.loop();
-  webSocket.loop();
+
+  if (isWorkMode)
+  {
+    if (!mqttClient.connected())
+    {
+      tryMQTTConnect();
+    }
+    mqttClient.loop();
+  }
+  else
+  {
+    settingsServer.loop();
+  }
 }

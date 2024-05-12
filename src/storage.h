@@ -7,7 +7,6 @@ struct SettingsStructure
 {
   char name[50];
   char hubIp[16];
-  char key[50];
   char wifiSsid[32];
   char wifiPassword[32];
 };
