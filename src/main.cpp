@@ -26,6 +26,7 @@ const char *AP_SSID = "WemosRelay";
 const char *AP_PASS = "12345678";
 
 String name;
+String hubIp;
 
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
@@ -50,24 +51,32 @@ bool statusBeforeAction = false;
 
 bool isWorkMode = false;
 
+void sendStatus()
+{
+  String topic = "device/" + name + "/status/set";
+  String jsonString = "{\"status\": " + String(currStatus ? "true" : "false") + "}";
+
+  mqttClient.publish(topic.c_str(), jsonString.c_str());
+}
+
 void toggleStatus(bool isOn)
 {
   if (isOn)
   {
     digitalWrite(RELAY, HIGH);
-    digitalWrite(ON_LED, HIGH);
-    digitalWrite(OFF_LED, LOW);
+    onLed.on();
+    offLed.off();
     currStatus = true;
-    // webSocket.sendTXT("{\"action\": \"changeStatus\", \"status\": true}");
   }
   else
   {
+    offLed.on();
+    onLed.off();
     digitalWrite(RELAY, LOW);
-    digitalWrite(OFF_LED, HIGH);
-    digitalWrite(ON_LED, LOW);
     currStatus = false;
-    // webSocket.sendTXT("{\"action\": \"changeStatus\", \"status\": false}");
   }
+
+  sendStatus();
 }
 
 void toggleAutoChanging(bool isOn)
@@ -102,16 +111,10 @@ void readButtons()
   }
 }
 
-void sendStatus()
+void handleAutoChangeStatus(bool deviceStatus, bool sensorStatus)
 {
-  String topic = "device/" + name + "/status/set";
-  String jsonString = "{\"status\": " + String(currStatus ? "true" : "false") + "}";
-
-  mqttClient.publish(topic.c_str(), jsonString.c_str());
-}
-
-void handleAutoChangeStatus (bool deviceStatus, bool sensorStatus) {
-  if(!isAutoChanging) return;
+  if (!isAutoChanging)
+    return;
   if (sensorStatus)
   {
     isAutoToggled = true;
@@ -131,7 +134,6 @@ void handleAutoChangeStatus (bool deviceStatus, bool sensorStatus) {
 void MQTTcallback(char *topic, byte *payload, unsigned int length)
 {
   String changeStatusTopic = "device/" + name + "/status/change";
- 
 
   Serial.print("Message received in topic: ");
   Serial.println(topic);
@@ -159,23 +161,25 @@ void MQTTcallback(char *topic, byte *payload, unsigned int length)
   }
   else if (strcmp(topic, changeStatusTopic.c_str()) == 0)
   {
-    if(doc["isAction"]){
+    if (doc["isAction"])
+    {
       handleAutoChangeStatus(doc["deviceStatus"], doc["sensorStatus"]);
     }
-    else{
+    else
+    {
       toggleStatus(doc["deviceStatus"]);
     }
   }
- 
 }
 
 void tryMQTTConnect()
 {
+  mqttClient.setServer(hubIp.c_str(), 1883);
   while (!mqttClient.connected())
   {
     Serial.println("Connecting to MQTT");
     readButtons();
-    if (mqttClient.connect("ESP8266"))
+    if (mqttClient.connect(name.c_str()))
     {
       Serial.println("connected");
       workLed.on();
@@ -226,6 +230,7 @@ void setup()
     SettingsStructure settings = storage.getSettings();
 
     name = settings.name;
+    hubIp = settings.hubIp;
 
     WiFi.begin(settings.wifiSsid, settings.wifiPassword);
     while (WiFi.status() != WL_CONNECTED)
@@ -239,7 +244,6 @@ void setup()
     Serial.print("Connected to WiFi :");
     Serial.println(WiFi.SSID());
 
-    mqttClient.setServer(settings.hubIp, 1883);
     tryMQTTConnect();
   }
   else
