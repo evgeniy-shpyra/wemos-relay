@@ -114,6 +114,7 @@ void readButtons()
 
 void handleAutoChangeStatus(bool deviceStatus, bool sensorStatus)
 {
+  
   if (!isAutoChanging)
     return;
   if (sensorStatus)
@@ -136,16 +137,16 @@ void MQTTcallback(char *topic, byte *payload, unsigned int length)
 {
   String changeStatusTopic = "device/" + name + "/status/change";
 
-  Serial.print("Message received in topic: ");
-  Serial.println(topic);
-  Serial.print("Message:");
+  // Serial.print("Message received in topic: ");
+  // Serial.println(topic);
+  // Serial.print("Message:");
   String message;
   for (int i = 0; i < length; i++)
   {
     message = message + (char)payload[i];
   }
 
-  Serial.println(message);
+  // Serial.println(message);
 
   DynamicJsonDocument doc(200);
   DeserializationError error = deserializeJson(doc, message);
@@ -162,6 +163,7 @@ void MQTTcallback(char *topic, byte *payload, unsigned int length)
   }
   else if (strcmp(topic, changeStatusTopic.c_str()) == 0)
   {
+    Serial.println(message);
     if (doc["isAction"])
     {
       handleAutoChangeStatus(doc["deviceStatus"], doc["sensorStatus"]);
@@ -195,7 +197,7 @@ void tryMQTTConnect()
   mqttClient.setCallback(MQTTcallback);
   mqttClient.subscribe("ping");
 
-  String changeStatusTopic = "device/" + name + "/status/#";
+  String changeStatusTopic = "device/" + name + "/status/change";
   mqttClient.subscribe(changeStatusTopic.c_str());
 
   String getStatusTopic = "device/" + name + "/status/get";
