@@ -182,6 +182,8 @@ void tryMQTTConnect()
   {
     Serial.println("Connecting to MQTT");
     readButtons();
+
+    String mqttName = "device-" + name;
     if (mqttClient.connect(name.c_str()))
     {
       Serial.println("connected");
@@ -272,6 +274,10 @@ void loop()
   {
     if (!mqttClient.connected())
     {
+      workLed.toggle();
+      delay(250);
+      workLed.toggle();
+      delay(250);
       tryMQTTConnect();
     }
     mqttClient.loop();
