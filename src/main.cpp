@@ -3,6 +3,7 @@
 
 #include "button.h"
 #include "led.h"
+#include "writer.h"
 #include "storage.h"
 #include "server.h"
 
@@ -32,6 +33,8 @@ String hubIp;
 WiFiClient espClient;
 PubSubClient mqttClient(espClient);
 
+Writer relay(RELAY);
+
 Led settingsLed(SETTINGS_LED_PIN);
 Led workLed(WORK_LED_PIN);
 Led onLed(ON_LED);
@@ -45,7 +48,6 @@ Button resetBtn(RESET_BTN);
 Storage storage;
 SettingsServer settingsServer(storage, settingsLed);
 
-bool currStatus = false;
 bool isAutoToggled = false;
 bool isAutoChanging = true;
 bool statusBeforeAction = false;
@@ -55,7 +57,7 @@ bool isWorkMode = false;
 void sendStatus()
 {
   String topic = "device/" + name + "/status/set";
-  String jsonString = "{\"status\": " + String(currStatus ? "true" : "false") + "}";
+  String jsonString = "{\"status\": " + String(relay.getStatus() ? "true" : "false") + "}";
 
   mqttClient.publish(topic.c_str(), jsonString.c_str());
 }
@@ -64,20 +66,21 @@ void toggleStatus(bool isOn)
 {
   if (isOn)
   {
-    digitalWrite(RELAY, HIGH);
+    relay.on();
     onLed.on();
     offLed.off();
-    currStatus = true;
+
   }
   else
   {
+    relay.off();
     offLed.on();
     onLed.off();
-    digitalWrite(RELAY, LOW);
-    currStatus = false;
   }
 
-  sendStatus();
+  if(isWorkMode){
+    sendStatus();
+  }
 }
 
 void toggleAutoChanging(bool isOn)
@@ -95,7 +98,7 @@ void readButtons()
   if (toggleStatusBtn.isClick())
   {
     Serial.println("toggleStatusBtn");
-    toggleStatus(!currStatus);
+    toggleStatus(!relay.getStatus());
   }
 
   if (toggleAutoChangingBtn.isClick())
@@ -120,7 +123,7 @@ void handleAutoChangeStatus(bool deviceStatus, bool sensorStatus)
   if (sensorStatus)
   {
     isAutoToggled = true;
-    statusBeforeAction = currStatus;
+    statusBeforeAction = relay.getStatus();
     toggleStatus(deviceStatus);
   }
   else
